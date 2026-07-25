@@ -1,0 +1,198 @@
+name: jetson-assistant
+
+services:
+  # ---------------------------------------------------------------- vector db
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    restart: unless-stopped
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+      QDRANT__LOG_LEVEL: WARN
+      # keep the HNSW index on disk; RAM is the scarce resource on an 8 GB Orin
+      QDRANT__STORAGE__ON_DISK_PAYLOAD: "true"
+    networks: [assistant]
+    healthcheck:
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ------------------------------------------------------- embeddings (CPU)
+  # multilingual-e5-small via onnxruntime. Deliberately CPU-only: the GPU is
+  # fully booked by llama.cpp + whisper.cpp, and a 384-dim 118M-parameter model
+  # is cheap enough on the Orin's A78 cores.
+  embedder:
+    build:
+      context: ./services/embedder
+    restart: unless-stopped
+    volumes:
+      - ./models/embedding:/models:ro
+    environment:
+      EMBED_MODEL_DIR: /models/multilingual-e5-small
+      EMBED_MAX_LENGTH: "512"
+      OMP_NUM_THREADS: "2"
+      ORT_INTRA_OP_THREADS: "2"
+    networks: [assistant]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8002/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  # --------------------------------------------------------- speech to text
+  # whisper.cpp server, CUDA build. Backend does VAD + segmentation and posts
+  # finished utterances here as WAV.
+  stt:
+    build:
+      context: ./services/stt
+      args:
+        L4T_CUDA_DEVEL: ${L4T_CUDA_DEVEL:-nvcr.io/nvidia/l4t-cuda:12.2.12-devel}
+        L4T_CUDA_RUNTIME: ${L4T_CUDA_RUNTIME:-nvcr.io/nvidia/l4t-cuda:12.2.12-runtime}
+        CUDA_ARCH: ${CUDA_ARCH:-87}
+        WHISPER_CPP_REF: ${WHISPER_CPP_REF:-master}
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      WHISPER_MODEL: /models/${WHISPER_MODEL_FILE:-ggml-small-q5_1.bin}
+      WHISPER_THREADS: ${WHISPER_THREADS:-4}
+      # empty => auto language detection (Turkish + English both work)
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-auto}
+    volumes:
+      - ./models/whisper:/models:ro
+    networks: [assistant]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8003/ >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  # ------------------------------------------------------------------- llm
+  # llama.cpp server, CUDA build, OpenAI-compatible API with --jinja so that
+  # Qwen3's native tool-call template is used.
+  llm:
+    build:
+      context: ./services/llm
+      args:
+        L4T_CUDA_DEVEL: ${L4T_CUDA_DEVEL:-nvcr.io/nvidia/l4t-cuda:12.2.12-devel}
+        L4T_CUDA_RUNTIME: ${L4T_CUDA_RUNTIME:-nvcr.io/nvidia/l4t-cuda:12.2.12-runtime}
+        CUDA_ARCH: ${CUDA_ARCH:-87}
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-master}
+    restart: unless-stopped
+    runtime: nvidia
+    # Without this the container inherits a ~64 KB memlock limit and --mlock
+    # fails ("Cannot allocate memory"). Unlocked model pages can be swapped out
+    # under memory pressure, which on this board means multi-second stalls
+    # mid-answer.
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      LLM_MODEL: /models/${LLM_MODEL_FILE:-Qwen3-4B-Instruct-2507-Q4_K_M.gguf}
+      LLM_CTX: ${LLM_CTX:-8192}
+      LLM_NGL: ${LLM_NGL:-99}
+      LLM_PARALLEL: ${LLM_PARALLEL:-1}
+      LLM_BATCH: ${LLM_BATCH:-512}
+      LLM_UBATCH: ${LLM_UBATCH:-128}
+      LLM_CACHE_TYPE: ${LLM_CACHE_TYPE:-q8_0}
+      LLM_THREADS: ${LLM_THREADS:-4}
+      LLM_EXTRA_ARGS: ${LLM_EXTRA_ARGS:-}
+    volumes:
+      - ./models/llm:/models:ro
+    networks: [assistant]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8001/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+
+  # --------------------------------------------------------------- backend
+  backend:
+    build:
+      context: ./services/backend
+    restart: unless-stopped
+    depends_on:
+      qdrant: {condition: service_started}
+      embedder: {condition: service_started}
+      llm: {condition: service_started}
+      stt: {condition: service_started}
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      EMBEDDER_URL: http://embedder:8002
+      STT_URL: http://stt:8003
+      LLM_URL: http://llm:8001
+      LLM_MODEL_NAME: ${LLM_MODEL_FILE:-Qwen3-4B-Instruct-2507-Q4_K_M.gguf}
+      DOCS_DIR: /data/docs
+      ASSISTANT_LANGUAGE: ${ASSISTANT_LANGUAGE:-auto}
+      TOOL_DECISION_TEMPERATURE: ${TOOL_DECISION_TEMPERATURE:-0.1}
+      HISTORY_TURNS: ${HISTORY_TURNS:-3}
+      # VAD / segmentation
+      VAD_AGGRESSIVENESS: ${VAD_AGGRESSIVENESS:-2}
+      VAD_SILENCE_MS: ${VAD_SILENCE_MS:-700}
+      VAD_MIN_SPEECH_MS: ${VAD_MIN_SPEECH_MS:-250}
+      VAD_MAX_UTTERANCE_MS: ${VAD_MAX_UTTERANCE_MS:-25000}
+      INTERIM_TRANSCRIPTION: ${INTERIM_TRANSCRIPTION:-true}
+      STT_LANGUAGE: ${STT_LANGUAGE:-tr}
+      INTERIM_INTERVAL_MS: ${INTERIM_INTERVAL_MS:-1400}
+      # RAG
+      RAG_TOP_K: ${RAG_TOP_K:-4}
+      CHUNK_CHARS: ${CHUNK_CHARS:-450}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-80}
+      RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.82}
+      ALWAYS_ON_RAG: ${ALWAYS_ON_RAG:-false}
+      RAG_TOOL_MIN_SCORE: ${RAG_TOOL_MIN_SCORE:-0.75}
+      # tools
+      SEARXNG_URL: ${SEARXNG_URL:-}
+      TOOLS_ENABLED: ${TOOLS_ENABLED:-true}
+      MAX_TOOL_ROUNDS: ${MAX_TOOL_ROUNDS:-4}
+      HTTP_USER_AGENT: ${HTTP_USER_AGENT:-Mozilla/5.0 (X11; Linux aarch64) JetsonAssistant/1.0}
+    volumes:
+      - ./data/docs:/data/docs
+    networks: [assistant]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ----------------------------------------------------- tls reverse proxy
+  # getUserMedia() only works in a "secure context". Reaching the Jetson from a
+  # phone over http://192.168.x.x would silently disable the mic button, so all
+  # LAN traffic is terminated here with a Caddy-issued internal certificate.
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      backend: {condition: service_started}
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+      - "${HTTPS_PORT:-8443}:8443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-https://jetson.local:8443}
+      SITE_HOST: ${SITE_HOST:-jetson.local}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./frontend:/srv/frontend:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [assistant]
+
+networks:
+  assistant:
+    driver: bridge
+
+volumes:
+  qdrant_storage:
+  caddy_data:
+  caddy_config:

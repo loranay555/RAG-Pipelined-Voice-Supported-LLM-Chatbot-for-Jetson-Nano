@@ -1,0 +1,62 @@
+{
+	admin off
+	# We terminate TLS ourselves with an internal CA; no ACME, no port 80 redirect.
+	auto_https disable_redirects
+
+	# A client connecting to a bare IP cannot send SNI (RFC 6066 forbids an IP
+	# there), so Caddy has no name to pick a certificate by and aborts the
+	# handshake with an internal error. This tells it which certificate to serve
+	# when SNI is absent -- without it, every browser gets ERR_SSL_PROTOCOL_ERROR.
+	default_sni {$SITE_HOST}
+}
+
+# ---------------------------------------------------------------------------
+# HTTPS -- this is the address you open on your phone.
+# getUserMedia() requires a secure context, so the microphone button only works
+# here, never on the plain-HTTP listener below.
+# ---------------------------------------------------------------------------
+{$SITE_ADDRESS} {
+	tls internal
+
+	encode gzip
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy backend:8000
+	}
+
+	@ws path /ws*
+	handle @ws {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# ---------------------------------------------------------------------------
+# Plain HTTP on :8080 -- text chat only, useful for curl and for browsers that
+# refuse the self-signed certificate.
+# ---------------------------------------------------------------------------
+:8080 {
+	encode gzip
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy backend:8000
+	}
+
+	@ws path /ws*
+	handle @ws {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+}

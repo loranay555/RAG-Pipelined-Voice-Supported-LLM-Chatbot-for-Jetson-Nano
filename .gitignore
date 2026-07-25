@@ -1,0 +1,17 @@
+# Model agirliklari (~3 GB) -- scripts/download_models.sh ile indirilir.
+# Klasorlerin kendisi repoda kalir: yoksa Docker bind-mount'lari root olarak
+# yaratir ve konteynerler modelleri okuyamaz.
+models/**
+!models/**/
+!models/**/.gitkeep
+
+# Kullanicinin kendi dokumanlari
+data/docs/*
+!data/docs/ornek-notlar.md
+
+# Yerel ayarlar (LAN IP'si vb.) -- .env.example sablonu repoda
+.env
+
+__pycache__/
+*.pyc
+build*.log

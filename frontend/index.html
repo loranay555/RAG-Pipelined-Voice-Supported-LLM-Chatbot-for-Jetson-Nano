@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0d1117" />
+<title>Jetson Asistan</title>
+<link rel="stylesheet" href="/styles.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" id="conn-dot" title="bağlantı"></span>
+    <h1>Jetson Asistan</h1>
+  </div>
+  <div class="topbar-actions">
+    <span class="status" id="status">bağlanıyor…</span>
+    <select class="lang" id="lang" title="Konuşma dili" aria-label="Konuşma dili">
+      <option value="tr">TR</option>
+      <option value="en">EN</option>
+      <option value="auto">Oto</option>
+    </select>
+    <button class="icon-btn" id="btn-reset" title="Sohbeti temizle" aria-label="Sohbeti temizle">⟲</button>
+  </div>
+</header>
+
+<main id="messages" class="messages" aria-live="polite">
+  <div class="empty" id="empty-state">
+    <div class="empty-icon">🎙️</div>
+    <p>Mikrofonu <strong>basılı tutup</strong> konuşun ya da aşağıya yazın.</p>
+    <div class="suggestions">
+      <button class="chip" data-q="Ankara'da hava nasıl?">Ankara'da hava nasıl?</button>
+      <button class="chip" data-q="Bugün teknoloji dünyasında ne oldu?">Bugün ne oldu?</button>
+      <button class="chip" data-q="Saat kaç?">Saat kaç?</button>
+    </div>
+    <p class="empty-hint">📎 ile PDF veya metin dosyası yükleyip içeriği hakkında soru sorabilirsiniz.</p>
+  </div>
+</main>
+
+<div class="banner" id="insecure-banner" hidden>
+  Mikrofon için <strong>https</strong> gerekiyor. Bu sayfaya
+  <code id="https-hint"></code> adresinden girin; yazarak sohbet burada da çalışır.
+</div>
+
+<footer class="composer">
+  <input type="file" id="file-input" multiple hidden
+         accept=".pdf,.txt,.md,.markdown,.rst,.csv,.json,.log" />
+  <button class="attach" id="btn-attach" title="Belge yükle (PDF, metin)" aria-label="Belge yükle">
+    <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
+      <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+            d="M21.4 11.05 12.25 20.2a5.5 5.5 0 0 1-7.78-7.78l9.2-9.2a3.67 3.67 0 1 1 5.18 5.18l-9.2 9.2a1.83 1.83 0 0 1-2.6-2.6l8.5-8.48"/>
+    </svg>
+  </button>
+
+  <button class="mic" id="btn-mic" title="Konuşmak için basılı tutun" aria-label="Mikrofon">
+    <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+      <path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3z"/>
+      <path fill="currentColor" d="M19 12a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V21a1 1 0 1 0 2 0v-2.08A7 7 0 0 0 19 12z"/>
+    </svg>
+    <span class="pulse" aria-hidden="true"></span>
+  </button>
+
+  <div class="input-wrap">
+    <textarea id="input" rows="1" placeholder="Bir şeyler yazın…" autocomplete="off"></textarea>
+  </div>
+
+  <button class="send" id="btn-send" title="Gönder" aria-label="Gönder">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3.39 10l12.6 2-12.6 2z"/>
+    </svg>
+  </button>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
