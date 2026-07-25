@@ -1,6 +1,6 @@
 # Jetson Sesli Asistan
 
-Jetson Orin Nano/NX 8 GB üzerinde tamamen yerel çalışan, aynı wifi ağındaki
+Jetson Orin 8 GB üzerinde tamamen yerel çalışan, aynı wifi ağındaki
 telefondan/bilgisayardan erişilebilen sesli + yazılı asistan.
 
 ```
@@ -13,43 +13,88 @@ telefon ─https─► caddy ─► backend (FastAPI)
 ```
 
 Ses akışı: tarayıcı mikrofon → 16 kHz PCM → WebSocket → sunucuda VAD ile cümle
-kesme → whisper.cpp → metin → RAG + araçlar → llama.cpp → token token geri.
+kesme → whisper.cpp → metin → araçlar → llama.cpp → token token geri.
+
+Jetson Orin NX 8 GB / JetPack 6.0 üzerinde çalışır durumda doğrulandı.
+Ölçülen değerler bölüm 8'de.
 
 ---
 
-## 1. Hızlı kurulum
+## 1. Kurulum
 
-Jetson'da, JetPack 6.x kurulu, Docker kurulu ve wifi bağlıyken:
+### Ön koşullar
+
+JetPack 6.x kurulu bir Orin ve wifi bağlantısı. Ortamı kontrol etmek için:
+
+```bash
+bash scripts/preflight.sh
+```
+
+Kart, JetPack sürümü, disk, Docker, nvidia runtime ve ağ erişimini raporlar.
+Hiçbir şeyi değiştirmez.
+
+### Docker
+
+JetPack Docker'ı kurulu getirmeyebilir. Kuruluysa **sürümüne dikkat edin** —
+Docker 28+ L4T çekirdeğinde çalışmıyor (sebebi bölüm 5'te):
+
+```bash
+sudo apt-get update && sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+sudo apt-get update
+
+V=5:27.5.1-1~ubuntu.22.04~jammy
+sudo apt-get install -y docker-ce=$V docker-ce-cli=$V containerd.io \
+                        docker-buildx-plugin docker-compose-plugin
+sudo apt-mark hold docker-ce docker-ce-cli    # 28'e yükselmesin
+sudo usermod -aG docker $USER
+```
+
+Ardından **oturumu kapatıp açın** (grup üyeliği için).
+
+### Asistan
 
 ```bash
 cd jetson-assistant
 
-# 1) host hazırlığı: nvidia default runtime, MAXN, 8 GB swap
+# 1) host hazırlığı: nvidia default runtime, güç modu, 8 GB swap
 make setup
 
-# 2) modelleri indir (~3.2 GB)
+# 2) modelleri indir (~3.1 GB)
 make models
 
 # 3) imajları derle — llama.cpp ve whisper.cpp CUDA derlemesi
-#    Orin Nano'da 45-70 dakika sürer, bir kere yapılır
-make build
+#    Orin NX 15W'ta ~40 dakika (ikisi paralel), bir kere yapılır
+make build 2>&1 | tee build.log
 
 # 4) çalıştır
 make up
 make health
 ```
 
-`make setup` LAN IP'nizi bulup `.env` içindeki `SITE_ADDRESS`'i doldurur.
-Adresi ekrana yazar, telefondan onu açarsınız:
+`make setup` LAN IP'nizi bulup `.env`'e yazar. Kart birden fazla ağda görünüyorsa
+(ör. Tailscale de varsa) doğru IP'yi elle verin:
+
+```bash
+bash scripts/set_lan_ip.sh 192.168.1.68
+```
+
+Telefondan açacağınız adres:
 
 ```
-https://192.168.1.50:8443
+https://192.168.1.68:8443
 ```
 
 > **Sertifika uyarısı normaldir.** Caddy kendi iç sertifika otoritesiyle imza
 > atıyor. "Gelişmiş → Yine de devam et" dedikten sonra mikrofon çalışır.
+> `https://` yazmayı unutmayın; telefon tarayıcıları portlu adreste otomatik
+> HTTPS'e geçmez.
 
-IP değişirse: `bash scripts/set_lan_ip.sh && docker compose up -d --force-recreate caddy`
+IP değişirse: `bash scripts/set_lan_ip.sh <yeni-ip> && docker compose up -d --force-recreate caddy`
 
 ---
 
@@ -57,25 +102,12 @@ IP değişirse: `bash scripts/set_lan_ip.sh && docker compose up -d --force-recr
 
 | Parça | Seçim | Gerekçe |
 |---|---|---|
-| LLM | Qwen3-4B-Instruct-2507 Q4_K_M | ~2.6 GB. 8 GB'lik paylaşımlı bellekte whisper + qdrant ile birlikte rahat sığar. Tool calling şablonu GGUF'un içinde geliyor, Türkçesi iyi. Düşünme modu olmadığı için sesli kullanımda gecikme düşük. |
-| STT | whisper.cpp `small-q5_1` | Türkçe + İngilizce aynı modelde, dil otomatik algılanıyor. Streaming Conformer/Zipformer modelleri daha düşük gecikmeli ama Türkçe desteği yok. |
-| Embedding | multilingual-e5-small (ONNX, CPU) | 384 boyut, 118M parametre. Türkçe retrieval'ı boyutuna göre çok iyi (aşağıda ölçüm var). Bilerek CPU'da: GPU tamamen LLM + whisper'ın. |
-| Vektör DB | Qdrant | İstenildiği gibi. Vektörler ve payload disk üzerinde tutuluyor (`on_disk`), RAM'i yemesin diye. |
+| LLM | Qwen3-4B-Instruct-2507 Q4_K_M | ~2.6 GB. 8 GB paylaşımlı bellekte whisper + qdrant ile birlikte sığıyor. Tool calling şablonu GGUF'un içinde. Düşünme modu olmadığı için sesli kullanımda gecikme düşük. |
+| STT | whisper.cpp `small-q5_1` | Türkçe + İngilizce aynı modelde. Streaming Conformer/Zipformer modelleri daha düşük gecikmeli ama Türkçe desteği yok. |
+| Embedding | multilingual-e5-small (ONNX, CPU) | 384 boyut, 118M parametre. Türkçe retrieval'ı boyutuna göre çok iyi. Bilerek CPU'da: GPU tamamen LLM + whisper'ın. |
+| Vektör DB | Qdrant | Vektörler ve payload disk üzerinde (`on_disk`), RAM'i yemesin diye. |
 | Proxy | Caddy | `getUserMedia()` yalnızca "secure context"te çalışır. `http://192.168.x.x` üzerinden telefonun mikrofonu **sessizce** kapalı kalırdı. |
-| UI | Vanilla JS + CSS | Build adımı yok, ~25 KB. |
-
-### 8 GB bellek bütçesi
-
-| | RAM |
-|---|---|
-| llama.cpp (ağırlık + 8k KV, q8_0 cache) | ~3.2 GB |
-| whisper.cpp small-q5 | ~0.6 GB |
-| qdrant | ~0.3 GB |
-| backend + embedder + caddy | ~0.6 GB |
-| **toplam** | **~4.7 GB** |
-
-Kalanı JetPack'in kendisi kullanıyor. Masaüstü oturumu kapalıysa (`multi-user.target`)
-yaklaşık 800 MB daha kazanırsınız. `sudo tegrastats` ile izleyin.
+| UI | Vanilla JS + CSS | Build adımı yok, ~30 KB. |
 
 ### RAG ne zaman devreye giriyor?
 
@@ -91,61 +123,62 @@ user   : "Kart odasının anahtarı nerede duruyor?"
 Dokümanlara yalnızca model gerekli görüp `knowledge_search` aracını çağırınca
 bakılır; sonuç ayrı bir araç mesajı olarak döner, soruyla karışmaz.
 
-`ALWAYS_ON_RAG=true` yaparsanız eski davranışa dönersiniz: her soruda otomatik
-arama yapılır ve bulunanlar ek bir sistem mesajı olarak eklenir. Tüm koleksiyon
-tek bir konuya aitse bir tur tasarruf ettirir, aksi halde alakasız bağlam taşır.
+`ALWAYS_ON_RAG=true` yaparsanız her soruda otomatik arama yapılır ve bulunanlar
+ek bir sistem mesajı olarak eklenir. Tüm koleksiyon tek bir konuya aitse bir tur
+tasarruf ettirir, aksi halde alakasız bağlam taşır.
 
 ### İki farklı eşik neden var?
 
 e5 modellerinin kosinüs skorları dar bir banda sıkışır; "0.5 civarı alakasız"
-sezgisi burada çalışmaz. Türkçe örnek veriyle ölçtüm:
+sezgisi burada çalışmaz. Türkçe veriyle ölçüldü:
 
 | | skor aralığı |
 |---|---|
 | doğru parça | 0.83 – 0.89 |
 | alakasız parça | 0.72 – 0.80 |
 
-`RAG_MIN_SCORE=0.82` otomatik enjeksiyon için (kapalı): oraya düşen her yanlış
-sonuç, dokümanlarla ilgisi olmayan bir sorunun önüne yapışır, o yüzden sıkı.
+`RAG_MIN_SCORE=0.82` otomatik enjeksiyon için (varsayılan kapalı): oraya düşen
+her yanlış sonuç, dokümanlarla ilgisi olmayan bir sorunun önüne yapışır.
 
 `RAG_TOOL_MIN_SCORE=0.75` ise `knowledge_search` için: model zaten sorunun
 kullanıcının dosyalarıyla ilgili olduğuna karar vermiştir, her alıntının yanında
 benzerlik skorunu görür, ve "bulunamadı" demek sınırda bir pasaj vermekten daha
-kötüdür. Ölçümde fark somut çıktı: doğru PDF'i bulan bir sorgu 0.809 aldı, yani
-0.82 ile elenip boş dönerdi.
+kötüdür. Fark somut: doğru PDF'i bulan bir sorgu 0.809 aldı, 0.82 ile elenip boş
+dönerdi.
 
-Ayrıca parça boyutu eşikten daha belirleyici
-çıktı: üç ayrı konuyu barındıran 780 karakterlik tek bir parça, hem alakalı hem
-alakasız sorguya **0.820** verdi. 450 karaktere düşürünce alakalı sorgular
-0.825–0.884'e çıktı, alakasız olan 0.801'de kaldı. `CHUNK_CHARS`'ı
-değiştirdiğinizde saklanan indeks otomatik olarak geçersiz sayılır ve dosyalar
-yeniden parçalanır.
+Parça boyutu eşikten daha belirleyici çıktı: üç konuyu barındıran 780
+karakterlik tek parça, hem alakalı hem alakasız sorguya **0.820** verdi. 450
+karaktere düşürünce alakalılar 0.825–0.884'e çıktı, alakasız 0.801'de kaldı.
+`CHUNK_CHARS` değişince saklanan indeks otomatik geçersiz sayılır.
 
 ---
 
 ## 3. Kullanım
 
-**Dil seçici:** sağ üstteki `TR / EN / Oto`. Seçim tarayıcıda saklanır ve her
-ses paketiyle birlikte gönderilir. Varsayılan **TR** — `Oto` varsayılan değil,
-çünkü whisper dili sesin ilk saniyelerinden tahmin ediyor ve 2 saniyelik Türkçe
-cümlelerde düzenli olarak Farsça/Arapça'ya kayıyor.
+**Mikrofon: basılı tutun.** Tuttuğunuz sürece kaydeder, bıraktığınızda gönderir.
+Basılı tutarken sessizlikte otomatik kesme devre dışıdır — cümle ortasında nefes
+alsanız bölünmez. 25 saniyelik üst sınır güvenlik için durur.
 
-**Telefon/tarayıcı:** mikrofon butonuna basıp konuşun, tekrar basınca durur.
-Konuşurken sustuğunuzda VAD cümleyi kendiliğinden kapatır ve işlemeye başlar —
-butona tekrar basmayı beklemez. Mikrofon zorunlu değil, alttaki kutuya
-yazabilirsiniz.
+**Dil seçici:** sağ üstteki `TR / EN / Oto`. Seçim tarayıcıda saklanır ve her ses
+paketiyle gönderilir. Varsayılan **TR** — `Oto` varsayılan değil, çünkü whisper
+dili sesin ilk saniyelerinden tahmin ediyor ve 2 saniyelik Türkçe cümlelerde
+düzenli olarak Farsça/Arapça'ya kayıyor.
 
-**Kendi dokümanlarınız:** `data/docs/` içine `.pdf`/`.md`/`.txt`/`.csv`/`.json`
-koyun, `make rescan` deyin. Sadece değişen dosyalar yeniden işlenir. Tek dosyayı
-ayağa kalkmış sisteme yüklemek için:
+**Yazmak:** mikrofon zorunlu değil, alttaki kutuya yazabilirsiniz. HTTPS
+olmayan bir adresten girdiyseniz mikrofon kapalı olur ama yazı çalışır.
 
-```bash
-curl -X POST -F "file=@kilavuz.pdf" http://localhost:8080/api/ingest/upload
-```
+**Belge yüklemek:** 📎 düğmesi, ya da sayfaya sürükle-bırak. PDF, `.txt`, `.md`,
+`.csv`, `.json` kabul edilir; sonuç sohbete düşer (`kilavuz.pdf eklendi — 12
+parça`). Toplu iş için `data/docs/` klasörüne koyup `make rescan` deyin; sadece
+değişen dosyalar yeniden işlenir.
 
 PDF'ler pypdf'in metin katmanından okunur. Taranmış (görüntü) PDF'lerde metin
 katmanı yoktur; bunlar OCR ister, bu yığında OCR yok — böyle bir dosya
 yüklenirse 400 ile açıkça reddedilir.
+
+**Sohbet geçmişi** bellekte, WebSocket bağlantısına bağlı. Sayfa yenilenince
+sıfırlanır; ⟲ düğmesi de temizler. Son 3 tur modele gönderilir. Belgeler ve
+hafıza kalıcıdır (Qdrant volume'unda).
 
 **Komut satırından:**
 
@@ -153,6 +186,8 @@ yüklenirse 400 ile açıkça reddedilir.
 curl -N -X POST http://localhost:8080/api/chat \
   -H 'content-type: application/json' \
   -d '{"message":"İstanbul hava durumu nedir?"}'
+
+curl -X POST -F "file=@kilavuz.pdf" http://localhost:8080/api/ingest/upload
 ```
 
 ### Asistanın araçları
@@ -164,47 +199,70 @@ curl -N -X POST http://localhost:8080/api/chat \
 | `get_weather` | open-meteo.com | yok |
 
 Sadece üç araç var, bilerek. `fetch_page`, `remember` ve `get_current_time`
-kodda duruyor ama modele **tanıtılmıyor** — ölçüm, dördüncü aracın kalan
-üçünün doğruluğunu bozduğunu gösterdi (aşağıda). Saat sistem promptunda.
+kodda duruyor ama modele **tanıtılmıyor** — ölçüm, dördüncü aracın kalan üçünün
+doğruluğunu bozduğunu gösterdi (bölüm 5).
+Saat sistem promptunda.
+
+### Birden fazla cihaz
+
+Her tarayıcı sekmesi kendi oturumunu alır: sohbet geçmişi, dil seçimi ve
+mikrofon akışı bağımsızdır. Ama llama.cpp ve whisper tek istek işler, ikinci
+kullanıcı sıraya girer.
+
+İki cihaz düzenli kullanacaksa `.env` içinde `LLM_PARALLEL=2` yapın. Ek bellek
+maliyeti yok (`LLM_CTX` iki yuvaya bölünür) ve her kullanıcı kendi prompt
+cache'ini korur. Bedeli: kişi başı bağlam yarıya iner. Aynı anda iki kişi
+konuşacaksa `INTERIM_TRANSCRIPTION=false` da yapın — canlı önizleme whisper
+kuyruğunun yarısını yiyor.
 
 ---
 
 ## 4. Ayarlar
 
-Hepsi `.env` içinde. Sık kurcalanacaklar:
+Hepsi `.env` içinde.
 
 ```bash
-LLM_CTX=8192              # bağlam. 4096 yaparsanız ~600 MB kazanırsınız
-LLM_CACHE_TYPE=q8_0       # f16 yaparsanız kalite çok az artar, KV belleği ikiye katlanır
-WHISPER_MODEL_FILE=ggml-small-q5_1.bin   # base-q5_1 = 2x hızlı, Türkçesi zayıf
-WHISPER_LANGUAGE=auto     # tr veya en ile sabitlerseniz algılama adımı kalkar, biraz hızlanır
-VAD_SILENCE_MS=700        # cümle bitti sayılması için gereken sessizlik
-INTERIM_TRANSCRIPTION=true  # konuşurken canlı önizleme; GPU'yu meşgul eder, false yapılabilir
-RAG_MIN_SCORE=0.82        # aşağıda açıklandı
+# --- bellek / hız ---
+LLM_CTX=8192              # 4096 yaparsanız ~600 MB kazanırsınız
+LLM_CACHE_TYPE=q8_0       # f16 kaliteyi çok az artırır, KV belleğini ikiye katlar
+LLM_PARALLEL=1            # 2 = iki eşzamanlı kullanıcı, bağlam bölünür
+INTERIM_TRANSCRIPTION=true  # konuşurken canlı önizleme; GPU'yu meşgul eder
+
+# --- ses ---
+WHISPER_MODEL_FILE=ggml-small-q5_1.bin  # ggml-small.bin (466 MB) daha doğru
+STT_LANGUAGE=tr           # arayüzde seçim yapılmamışsa varsayılan
+VAD_SILENCE_MS=900        # basılı tutma modunda kullanılmaz
+VAD_AGGRESSIVENESS=2      # sessiz ortamda 1 daha iyi olabilir
+
+# --- model davranışı ---
+TOOL_DECISION_TEMPERATURE=0.1  # araç seçimi bir sınıflandırma, 0.6'da kararsız
+HISTORY_TURNS=3           # artırmak prompt'u uzatır ve araç çağırmayı bozar
+
+# --- RAG ---
+RAG_MIN_SCORE=0.82
+RAG_TOOL_MIN_SCORE=0.75
 CHUNK_CHARS=450           # değiştirirseniz indeks otomatik geçersizleşir
+ALWAYS_ON_RAG=false
 ```
 
 Model değiştirmek: `models/llm/` içine yeni GGUF'u koyup `LLM_MODEL_FILE`'ı
 güncelleyin, `docker compose up -d llm`. İmajı yeniden derlemeye gerek yok.
+Aynısı whisper için de geçerli.
 
 ---
 
 ## 5. Sorun giderme
 
-**`make build` sırasında derleyici öldü / OOM**
-nvcc bellek canavarı. `services/llm/Dockerfile` ve `services/stt/Dockerfile`
-içindeki `BUILD_JOBS=4`'ü 2'ye düşürün.
+### `iptables ... table 'raw' does not exist` — container ağı kurulamıyor
 
-**`nvidia-container-runtime` bulunamadı / build CUDA görmüyor**
-`make setup` Docker'ın default runtime'ını `nvidia` yapar. Yapmadıysanız
-imajlar derlenirken CUDA başlıklarını bulamaz.
+L4T çekirdeğinde `iptable_raw.ko` derlenmemiş, Docker 28+ ise "direct access
+filtering" için o tabloyu kullanıyor. Docker'ı 27.x'e sabitleyin (bölüm 1). `update-alternatives` ile iptables'ı nft arka ucuna almak
+da işe yarar ama sistem geneli bir değişikliktir; makinede Tailscale/VPN varsa
+onların kuralları görünmez olur.
 
-**Telefonda mikrofon butonu gri**
-`http://` ile girmişsinizdir. `https://<ip>:8443` kullanın. Sayfa üstünde bir
-uyarı şeridi de çıkar.
+### `l4t-cuda:...` çekilemedi / derleme CUDA hatası veriyor
 
-**`l4t-cuda:...` çekilemedi / derleme CUDA hatası veriyor**
-Etiket karttaki CUDA sürümüyle eşleşmeli. Kontrol: `cat /usr/local/cuda/version.json`
+Etiket karttaki CUDA sürümüyle eşleşmeli: `cat /usr/local/cuda/version.json`
 
 | JetPack | L4T | etiket |
 |---|---|---|
@@ -212,14 +270,14 @@ Etiket karttaki CUDA sürümüyle eşleşmeli. Kontrol: `cat /usr/local/cuda/ver
 | 6.1 / 6.2 | r36.4 | `12.6.11-devel` / `12.6.11-runtime` |
 | 5.x | r35 | `11.4.19-devel` / `11.4.19-runtime` |
 
-`.env` içinde `L4T_CUDA_DEVEL` / `L4T_CUDA_RUNTIME` ile değiştirin.
-`CUDA_ARCH` Orin'de her durumda 87.
+`.env` içinde `L4T_CUDA_DEVEL` / `L4T_CUDA_RUNTIME`. `CUDA_ARCH` Orin'de 87.
+`12.2.12-devel` bulunamazsa alternatif: `nvcr.io/nvidia/l4t-jetpack:r36.3.0`.
 
-**Link hatası: `libcuda.so.1 not found`, `undefined reference to cuMemCreate`**
+### Link hatası: `libcuda.so.1 not found`, `undefined reference to cuMemCreate`
+
 `libcuda.so.1` CUDA *sürücüsüdür*; nvidia container runtime onu yalnızca
-**çalışma anında** enjekte eder, `docker build` sırasında ortada yoktur. Bu
-yüzden her iki Dockerfile toolkit'in stub kütüphanesini kullanıyor. Çözüm iki
-parçalı ve **ikisi de gerekli**:
+**çalışma anında** enjekte eder, `docker build` sırasında yoktur. Çözüm iki
+parçalı ve ikisi de gerekli:
 
 ```dockerfile
 RUN ln -sf libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
@@ -230,48 +288,30 @@ RUN ln -sf libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
 **`-L` tek başına yetmez.** `ld`, bir kütüphanenin *dolaylı* bağımlılığını
 (`libggml-cuda.so` → `DT_NEEDED: libcuda.so.1`) çözerken `-L` yollarına bakmaz;
 yalnızca `-rpath-link`, `-rpath`, `LD_LIBRARY_PATH` ve sistem dizinlerine bakar.
-Ayrıca birebir `libcuda.so.1` adını arar, oysa stub'ın dosya adı `libcuda.so` —
-symlink bu yüzden şart.
+Ayrıca birebir `libcuda.so.1` adını arar, stub'ın dosya adı ise `libcuda.so`.
 
-`-rpath` değil **`-rpath-link`** kullanılıyor: ikincisi yalnızca link zamanı
-arama yoludur, ikiliye gömülmez. `-rpath` olsaydı Jetson'da gerçek sürücü yerine
-boş stub yüklenir ve GPU sessizce çalışmazdı.
+`-rpath` değil **`-rpath-link`**: ikincisi yalnızca link zamanı arama yoludur,
+ikiliye gömülmez. `-rpath` olsaydı Jetson'da gerçek sürücü yerine boş stub
+yüklenir ve GPU sessizce çalışmazdı.
 
-Derleme dizini ayrıca BuildKit cache mount'unda tutuluyor; bir hata olursa
-tekrar denemede ~440 dosya baştan derlenmez.
+Derleme dizini BuildKit cache mount'unda tutuluyor; bir hata olursa tekrar
+denemede ~440 dosya baştan derlenmez.
 
-**`iptables ... table 'raw' does not exist` — container ağı kurulamıyor**
-L4T çekirdeğinde `iptable_raw.ko` derlenmemiş (`/lib/modules/$(uname -r)/kernel/net/ipv4/netfilter/`
-altında yok), Docker 28+ ise "direct access filtering" için o tabloyu kullanıyor.
-Çözüm: Docker'ı 27.x'e sabitleyin.
+### Telefonda `ERR_SSL_PROTOCOL_ERROR`
 
-```bash
-V=5:27.5.1-1~ubuntu.22.04~jammy
-sudo apt-get install -y --allow-downgrades docker-ce=$V docker-ce-cli=$V
-sudo apt-mark hold docker-ce docker-ce-cli   # yoksa ilk upgrade'de geri kırılır
-sudo systemctl restart docker
-```
+IP adresine bağlanan istemciler SNI gönderemez (RFC 6066 SNI'da IP'ye izin
+vermez), Caddy de hangi sertifikayı sunacağını seçemez. `.env` içinde
+`SITE_HOST` dolu olmalı (sadece IP, şemasız/portsuz) — `set_lan_ip.sh` bunu
+yazar. Caddyfile'daki `default_sni` bu değeri kullanır.
 
-`update-alternatives` ile iptables'ı nft arka ucuna almak da işe yarar ama
-sistem geneli bir değişikliktir; makinede Tailscale/VPN/firewall varsa onların
-kuralları görünmez olur. Docker'ı sabitlemek daha dar kapsamlı.
+### Telefonda mikrofon butonu gri
 
-**`nvpmodel` sadece 15W ve 7W gösteriyor**
-Normal. Bazı Orin NX kartlarında MAXN/25W profili tanımlı değildir; 15W (mod 0)
-o kartta tavandır ve `make setup` onu seçer. 7W moduna **girmeyin**, LLM
-kullanılamaz hale gelir.
+`http://` ile girmişsinizdir. `https://<ip>:8443` kullanın. Sayfa üstünde uyarı
+şeridi de çıkar.
 
-**`l4t-cuda:12.2.12-devel` bulunamadı**
-JetPack 6.0 için alternatif derleme imajı: `.env` içinde
-`L4T_CUDA_DEVEL=nvcr.io/nvidia/l4t-jetpack:r36.3.0` yapın. Bu imaj CUDA
-toolkit'i içerir, sadece daha büyüktür; `L4T_CUDA_RUNTIME` aynı kalabilir.
+### Model araçları hiç çağırmıyor, cevabı uyduruyor
 
-**Cevaplar çok yavaş**
-`sudo tegrastats` bakın. `RAM` doluysa `LLM_CTX`'i 4096'ya düşürün veya
-`INTERIM_TRANSCRIPTION=false` yapın. `GR3D_FREQ` düşükse `sudo nvpmodel -m 0`.
-
-**Model araçları hiç çağırmıyor, cevabı uyduruyor**
-Sistem promptu fazla uzamıştır. Qwen3-4B üzerinde temperature 0 ile ölçtüm:
+Sistem promptu fazla uzamıştır. Qwen3-4B üzerinde temperature 0 ile ölçüldü:
 
 | sistem promptu | sonuç |
 |---|---|
@@ -280,16 +320,12 @@ Sistem promptu fazla uzamıştır. Qwen3-4B üzerinde temperature 0 ile ölçtü
 | 589 karakter | **hiç çağırmıyor** |
 | 907 karakter | hiç çağırmıyor |
 
-Araç sayısı değil **promptun uzunluğu** belirleyici: kısa promptla 5 araç
-sorunsuz, uzun promptla 1 araç bile çalışmıyor. Üstelik kırılmaya sebep olan
-paragraf modele açıkça "araçları kullan" diyordu — yani sorun ifade değil,
-uzunluk. Hata sessiz: model "dosyayı yükleyin" diye cevap verir.
+Kırılmaya sebep olan paragraf modele açıkça "araçları kullan" diyordu — sorun
+ifade değil, **uzunluk**. Hata sessiz: model "dosyayı yükleyin" diye cevap verir.
+Çalışan bütçe **~400 karakter**.
 
-Çalışan bütçe **~400 karakter**. `services/backend/app/llm.py` içindeki
-`SYSTEM_PROMPT`'a bir şey eklerseniz yeniden ölçün.
-
-**Araç şemaları da aynı bütçeyi paylaşıyor.** Beş soruluk bir sınamayla ölçtüm
-(hava / haber / fiyat / belge / sohbet):
+**Araç şemaları aynı bütçeyi paylaşıyor.** Beş soruluk sınama (hava / haber /
+fiyat / belge / sohbet):
 
 | şemalar | toplam | sonuç |
 |---|---|---|
@@ -298,28 +334,55 @@ uzunluk. Hata sessiz: model "dosyayı yükleyin" diye cevap verir.
 | 3 araç, daha da güçlü tarifler | 1056 krktr | haber sorusunu yine kaçırıyor |
 
 Son satır önemli: tarifi daha ısrarcı yazmak ama uzatmak **kötüleştirdi**.
-Belirleyici olan ifadenin şiddeti değil, toplam uzunluk.
-
 İkinci kural: tarif, modelin cevabı **bilmediğini** söylemeli. "Weather for a
-city" gibi betimleyici bir tarif yok sayılıyor çünkü model havayı bildiğini
-sanıyor; "You do not know today's weather — always call this" çalışıyor.
+city" yok sayılıyor çünkü model havayı bildiğini sanıyor; "You do not know
+today's weather — always call this" çalışıyor.
 
-Araç eklemek isterseniz `services/backend/app/tools.py` içindeki ölçüm notunu
-okuyun ve sınamayı tekrarlayın.
+Araç veya prompt eklerken `services/backend/app/tools.py` ve `llm.py` içindeki
+ölçüm notlarını okuyun, sınamayı tekrarlayın.
 
-**Türkçe konuşma Farsça/Arapça yazıya çevriliyor**
+### Türkçe konuşma Farsça/Arapça yazıya çevriliyor
+
 Dil algılama kısa kayıtlarda güvenilmez. Arayüzdeki dil seçiciyi `TR` yapın
-(varsayılan zaten bu). Kalıcı varsayılanı `.env` içindeki `STT_LANGUAGE` belirler.
+(varsayılan zaten bu). Kalıcı varsayılan `.env` içindeki `STT_LANGUAGE`.
 
-**Transkripsiyon kalitesi düşük**
-Sırasıyla deneyin: mikrofona yaklaşın (en çok fark eden), `VAD_AGGRESSIVENESS=1`,
-ve kuantize olmayan modele geçin — `ggml-small.bin` (466 MB), `ggml-small-q5_1`'e
-göre gürültülü kayıtta ve nadir kelimelerde belirgin daha iyi.
+### Transkripsiyon kalitesi düşük
 
-**Whisper boş metin döndürüyor**
-Mikrofon izni verilmiş ama ses gelmiyor olabilir. `docker compose logs -f backend`
-ile `transcript` olaylarını izleyin; `VAD_AGGRESSIVENESS` değerini 1'e düşürmeyi
-deneyin (sessiz ortamda 3 fazla agresif kalır).
+Sırasıyla: mikrofona yaklaşın (en çok fark eden), `VAD_AGGRESSIVENESS=1`, ve
+kuantize olmayan modele geçin — `ggml-small.bin` (466 MB) gürültülü kayıtta ve
+nadir kelimelerde belirgin daha iyi.
+
+### `make build` sırasında derleyici öldü / OOM
+
+`services/llm/Dockerfile` ve `services/stt/Dockerfile` içindeki `BUILD_JOBS=4`'ü
+2'ye düşürün. `make setup`'ın eklediği 8 GB swap bunu genelde önler.
+
+### `nvpmodel` sadece 15W ve 7W gösteriyor
+
+Normal. Bazı Orin NX kartlarında MAXN/25W profili tanımlı değildir; 15W (mod 0)
+o kartta tavandır ve `make setup` onu seçer. 7W moduna **girmeyin**.
+
+### Cevaplar çok yavaş
+
+`sudo tegrastats` bakın. `RAM` doluysa `LLM_CTX`'i 4096'ya düşürün veya
+`INTERIM_TRANSCRIPTION=false` yapın. Masaüstü oturumunu kapatmak ~800 MB
+kazandırır: `sudo systemctl set-default multi-user.target && sudo reboot`.
+
+### GPU gerçekten kullanılıyor mu?
+
+```bash
+sudo tegrastats | grep --line-buffered -o "GR3D_FREQ [0-9]*%"
+```
+
+Cevap üretilirken %90-99, boştayken %0 olmalı. Sürekli %0 ise:
+
+```bash
+docker compose exec llm /opt/llama/llama-server --list-devices
+docker compose exec llm ldd /opt/llama/libggml-cuda.so | grep libcuda
+```
+
+`CUDA0: Orin` ve `libcuda.so.1 => /usr/lib/aarch64-linux-gnu/nvidia/libcuda.so.1`
+görmelisiniz.
 
 ---
 
@@ -333,9 +396,9 @@ frontend/                    index.html, app.js, worklet.js, styles.css
 services/
   backend/app/
     main.py                  FastAPI, websocket döngüsü, REST
-    llm.py                   llama.cpp'ye karşı araç çağrı döngüsü
-    tools.py                 web arama, hava durumu, RAG, hafıza
-    rag.py                   Qdrant koleksiyonları, chunk'lama, ingest
+    llm.py                   llama.cpp'ye karşı araç çağrı döngüsü + sistem promptu
+    tools.py                 araç şemaları ve uygulamaları
+    rag.py                   Qdrant koleksiyonları, chunk'lama, PDF, ingest
     audio.py                 WebRTC VAD ile cümle kesme
     clients.py               embedder / stt / llm HTTP istemcileri
     config.py                tüm ayarlar
@@ -344,51 +407,63 @@ services/
   stt/Dockerfile             whisper.cpp CUDA derlemesi
 models/                      GGUF + whisper + onnx (git'e girmez)
 data/docs/                   RAG'a girecek dosyalarınız
-scripts/                     model indirme, LAN IP, host hazırlığı
+scripts/
+  preflight.sh               ortam kontrolü (hiçbir şeyi değiştirmez)
+  jetson_setup.sh            nvidia runtime, güç modu, swap
+  download_models.sh         model indirme
+  set_lan_ip.sh              SITE_ADDRESS / SITE_HOST
 ```
 
 ---
 
 ## 7. Bilerek yapılmayanlar
 
-- **TTS yok.** Cevap yazıyla dönüyor. İstenirse Piper (ONNX, ~50 MB, Türkçe sesi
-  var) yedinci bir servis olarak eklenebilir; bellek maliyeti ~150 MB.
+- **TTS yok.** Cevap yazıyla dönüyor. Piper (ONNX, ~50 MB, Türkçe sesi var)
+  yedinci servis olarak eklenebilir; bellek maliyeti ~150 MB.
 - **Kimlik doğrulama yok.** Ev ağı varsayıldı. Ağ güvenilmiyorsa Caddy'ye
-  `basic_auth` eklemek iki satır.
-- **Çoklu kullanıcı yok.** `LLM_PARALLEL=1`; ikinci kullanıcı sırada bekler.
-  8 GB'de aynı anda iki dizi KV cache tutmak riskli.
+  `basic_auth` eklemek iki satır. Bu yüzden `tailscale funnel` gibi sayfayı
+  internete açan bir şey kullanmayın.
+- **Kalıcı sohbet geçmişi yok.** Bellekte tutuluyor. Vektör araması
+  gerektirmediği için Qdrant'a değil, SQLite'a yazılması gerekir.
+- **`fetch_page` ve `remember` devre dışı.** Kod duruyor, şema listesinde yok —
+  dördüncü araç ölçülebilir şekilde diğerlerini bozuyordu. Daha büyük bir
+  modele geçerseniz geri açılabilir.
+- **OCR yok.** Taranmış PDF'ler reddedilir.
 
 ---
 
-## 8. Neyin test edildiği
+## 8. Ölçümler
 
-Proje bir x86 geliştirme makinesinde yazıldı, hedef Jetson (aarch64 + CUDA)
-orada değildi. Şeffaf olmak gerekirse:
+Jetson Orin NX 8 GB, JetPack 6.0 (L4T r36.3, CUDA 12.2.12), güç modu 15W.
 
-**Gerçekten çalıştırılıp doğrulandı (x86, sahte llama.cpp/whisper.cpp ile):**
-- Embedding servisi: model yükleniyor, 384 boyut, Türkçe ve diller arası
-  retrieval doğru sıralıyor.
-- Qdrant koleksiyon oluşturma, chunk'lama, ingest, hash ile atlama,
-  `CHUNK_CHARS` değişince yeniden indeksleme.
-- PDF yükleme: gerçek bir PDF'ten metin çıkarma, indeksleme ve PDF'e özgü
-  sorguyla geri bulma. Bozuk PDF'ler 400 döndürüyor. (Gerçek bir *taranmış*
-  PDF ile "metin katmanı yok" dalı denenmedi.)
-- Sorunun modele değiştirilmeden ulaştığı, mesaj listesi doğrudan okunarak
-  doğrulandı: sadece sistem promptu + kullanıcı mesajı.
-- WebSocket akışı uçtan uca: metin turu, ses turu (sentetik PCM → WebRTC VAD →
-  cümle kesme → STT → cevap), `reset`, `ping`.
-- Araç çağrı döngüsü: birden çok delta'ya bölünmüş `tool_calls` argümanlarının
-  birleştirilmesi, aracın çalıştırılması, sonucun modele geri verilmesi.
-- Gerçek dış servisler: open-meteo (canlı Ankara verisi geldi), DuckDuckGo
-  araması, saat, hafızaya yazma + geri okuma, hatalı argüman/bilinmeyen araç
-  hataları.
-- `docker compose config` ve `caddy validate`.
+| | değer |
+|---|---|
+| LLM üretim hızı | **10.8 token/sn** |
+| LLM prompt işleme | **359 token/sn** |
+| Prompt cache | ikinci istekte 932 token → 1 token yeniden işleniyor |
+| Derleme süresi | ~40 dk (llama.cpp + whisper.cpp paralel) |
+| Çalışırken RAM | 6.4 / 7.6 GB (mlock ile model sabitlenmiş) |
+| GPU (üretim sırasında) | %99 |
+| Sıcaklık | derlemede 65°C, çıkarımda 55°C |
 
-**Test edilemedi, ilk çalıştırmada görülecek:**
-- llama.cpp ve whisper.cpp'nin CUDA/aarch64 derlemesi (`make build`).
-- Gerçek Qwen3-4B çıktısı, gerçek whisper doğruluğu ve gerçek token hızları.
-- Tarayıcı mikrofon yolu (AudioWorklet + self-signed sertifika) gerçek telefonda.
-- README'deki bellek bütçesi tablosu hesap, ölçüm değil.
+Prompt cache sayesinde sistem promptu ve araç şemalarının maliyeti sadece ilk
+istekte ödeniyor.
 
-Modeller `./models/` altına zaten indirildi (~3.1 GB), `make models` tekrar
-indirmez.
+**Hız artırmak için:** speculative decoding (Qwen3-0.6B taslak model, ~1.5-2x,
+~600 MB ek bellek) veya daha küçük modele inmek. Güç modunda yapılacak bir şey
+yok, 15W bu kartta tavan.
+
+### Neyin doğrulandığı
+
+**Gerçek donanımda çalışırken doğrulandı:** telefondan HTTPS erişimi ve
+mikrofon, bas-konuş modu, VAD segmentasyonu, whisper CUDA transkripsiyonu,
+Qwen3-4B GPU'da üretim, araç çağrıları (hava durumu, web araması, belge
+arama), PDF ve metin yükleme, dil seçici, Qdrant kalıcılığı.
+
+**x86'da sahte LLM/STT ile doğrulandı:** WebSocket protokolü uçtan uca,
+deltalara bölünmüş `tool_calls` argümanlarının birleştirilmesi, embedding
+retrieval kalitesi, chunk'lama ve yeniden indeksleme, PDF metin çıkarma ve
+hata yolları, bas-konuş modunun duraklamada bölmediği.
+
+**Doğrulanmadı:** eşzamanlı çoklu kullanıcı, gerçek bir taranmış PDF ile
+"metin katmanı yok" dalı, uzun süreli kararlılık.
